@@ -54,7 +54,8 @@ class AuthProvider extends ChangeNotifier {
 
   // ─── Sign Up ──────────────────────────────────────────────────
 
-  /// إنشاء حساب جديد وحفظ بيانات المستخدم في Firestore
+  /// إنشاء حساب جديد
+  /// ملاحظة: حفظ بيانات Firestore هو best-effort ولا يوقف عملية التسجيل
   Future<bool> signUp({
     required String email,
     required String password,
@@ -63,6 +64,7 @@ class AuthProvider extends ChangeNotifier {
     _setLoading(true);
 
     try {
+      // الخطوة 1: التسجيل في Firebase Auth (الأساس)
       final credential = await _authService.signUp(
         email: email,
         password: password,
@@ -71,25 +73,39 @@ class AuthProvider extends ChangeNotifier {
       final user = credential.user!;
       _firebaseUser = user;
 
-      // حفظ بيانات المستخدم في Firestore
-      final userModel = UserModel(
-        uid: user.uid,
-        email: user.email ?? email,
-        displayName: user.email?.split('@').first ?? 'مستخدم',
-        createdAt: DateTime.now(),
-      );
-      await _firestoreService.saveUserProfile(userModel);
-      _userModel = userModel;
+      // الخطوة 2: حفظ الملف الشخصي في Firestore (اختياري – لا يوقف التسجيل)
+      try {
+        final userModel = UserModel(
+          uid: user.uid,
+          email: user.email ?? email,
+          displayName: user.email?.split('@').first ?? 'مستخدم',
+          createdAt: DateTime.now(),
+        );
+        await _firestoreService.saveUserProfile(userModel);
+        _userModel = userModel;
+      } catch (firestoreError) {
+        // خطأ Firestore لا يلغي التسجيل الناجح
+        debugPrint('⚠️ Firestore profile save skipped: $firestoreError');
+      }
 
       _setLoading(false);
-      return true;
+      return true; // التسجيل ناجح
+
     } on FirebaseAuthException catch (e) {
       _setLoading(false);
+      debugPrint('🔴 FirebaseAuthException [signUp]: ${e.code} — ${e.message}');
+      _setError(AuthService.getArabicErrorMessage(e.code));
+      return false;
+    } on FirebaseException catch (e) {
+      _setLoading(false);
+      debugPrint('🔴 FirebaseException [signUp]: ${e.code} — ${e.message}');
       _setError(AuthService.getArabicErrorMessage(e.code));
       return false;
     } catch (e) {
       _setLoading(false);
-      _setError('حدث خطأ غير متوقع. يرجى المحاولة مجدداً.');
+      debugPrint('🔴 Unknown error [signUp]: $e');
+      // عرض رسالة تفصيلية بدلاً من الرسالة الغامضة
+      _setError('فشل إنشاء الحساب: ${e.toString().split('\n').first}');
       return false;
     }
   }
@@ -113,13 +129,21 @@ class AuthProvider extends ChangeNotifier {
       _firebaseUser = credential.user;
       _setLoading(false);
       return true;
+
     } on FirebaseAuthException catch (e) {
       _setLoading(false);
+      debugPrint('🔴 FirebaseAuthException [signIn]: ${e.code} — ${e.message}');
+      _setError(AuthService.getArabicErrorMessage(e.code));
+      return false;
+    } on FirebaseException catch (e) {
+      _setLoading(false);
+      debugPrint('🔴 FirebaseException [signIn]: ${e.code} — ${e.message}');
       _setError(AuthService.getArabicErrorMessage(e.code));
       return false;
     } catch (e) {
       _setLoading(false);
-      _setError('حدث خطأ غير متوقع. يرجى المحاولة مجدداً.');
+      debugPrint('🔴 Unknown error [signIn]: $e');
+      _setError('فشل تسجيل الدخول: ${e.toString().split('\n').first}');
       return false;
     }
   }
