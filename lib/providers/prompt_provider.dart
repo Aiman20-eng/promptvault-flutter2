@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/prompt_model.dart';
 import '../services/api_service.dart';
+import '../services/firestore_service.dart';
 import '../data/dummy_prompts.dart';
 
 class PromptProvider extends ChangeNotifier {
@@ -20,12 +22,17 @@ class PromptProvider extends ChangeNotifier {
   static const String _favoritesKey = 'favorite_ids';
   static const String _collectionKey = 'collection_ids';
   static const String _pendingSyncKey = 'pending_sync_ids';
-  
+
   bool _isInitializedFromApi = false;
   final Set<String> _pendingSyncIds = {};
 
+  // ─── Firestore sync ──────────────────────────────────────────
+  final FirestoreService _firestoreService = FirestoreService();
+  String? _currentUserId; // uid المستخدم المسجّل حالياً
+  StreamSubscription<List<String>>? _favoritesSubscription;
+
   PromptProvider() {
-    // Initialize with dummy data
+    // تهيئة بالبيانات المحلية
     _prompts = List.from(dummyPrompts);
     _loadFromStorage();
   }
@@ -139,17 +146,66 @@ class PromptProvider extends ChangeNotifier {
     final index = _prompts.indexWhere((p) => p.id == id);
     if (index != -1) {
       final prompt = _prompts[index];
-      _prompts[index] = prompt.copyWith(isFavorite: !prompt.isFavorite);
-      
-      // إضافة إلى قائمة المزامنة المعلقة
+      final newIsFav = !prompt.isFavorite;
+      _prompts[index] = prompt.copyWith(isFavorite: newIsFav);
+
+      // مزامنة Firestore إذا كان المستخدم مسجّلاً
+      if (_currentUserId != null) {
+        if (newIsFav) {
+          _firestoreService.addFavorite(_currentUserId!, id);
+        } else {
+          _firestoreService.removeFavorite(_currentUserId!, id);
+        }
+      }
+
+      // إضافة إلى قائمة المزامنة المعلقة (للـ MockAPI)
       _pendingSyncIds.add(id);
-      
+
       _saveToStorage();
       notifyListeners();
-      
-      // محاولة المزامنة الفورية إذا وجد إنترنت
+
+      // محاولة المزامنة الفورية مع MockAPI إذا وجد إنترنت
       _trySyncPrompt(id, _prompts[index].isFavorite);
     }
+  }
+
+  // ─── Firestore Integration ────────────────────────────────────
+
+  /// تهيئة مزامنة المفضلة مع Firestore عند تسجيل الدخول
+  void initFirestoreSync(String uid) {
+    if (_currentUserId == uid) return; // تجنب التهيئة المتكررة
+    _currentUserId = uid;
+
+    // إلغاء الاشتراك السابق إن وُجد
+    _favoritesSubscription?.cancel();
+
+    // الاشتراك في stream المفضلة من Firestore بالوقت الفعلي
+    _favoritesSubscription = _firestoreService
+        .getFavoritesStream(uid)
+        .listen((favoriteIds) {
+      bool changed = false;
+      for (var i = 0; i < _prompts.length; i++) {
+        final shouldBeFav = favoriteIds.contains(_prompts[i].id);
+        if (_prompts[i].isFavorite != shouldBeFav) {
+          _prompts[i] = _prompts[i].copyWith(isFavorite: shouldBeFav);
+          changed = true;
+        }
+      }
+      if (changed) notifyListeners();
+    });
+  }
+
+  /// إيقاف مزامنة Firestore عند تسجيل الخروج
+  void clearFirestoreSync() {
+    _favoritesSubscription?.cancel();
+    _favoritesSubscription = null;
+    _currentUserId = null;
+  }
+
+  @override
+  void dispose() {
+    _favoritesSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _trySyncPrompt(String id, bool isFav) async {
